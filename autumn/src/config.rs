@@ -1194,13 +1194,18 @@ pub struct ReplicationConfig {
     pub allow_shared_bucket: bool,
 
     /// S3-compatible destination (`[replication.s3]`). Mutually exclusive with
-    /// [`path`](Self::path).
+    /// [`turso`](Self::turso) and [`path`](Self::path).
     #[serde(default)]
     pub s3: Option<ReplicationS3Config>,
 
+    /// Turso / libSQL `/v2/pipeline` HTTP destination (`[replication.turso]`).
+    /// Mutually exclusive with [`s3`](Self::s3) and [`path`](Self::path).
+    #[serde(default)]
+    pub turso: Option<ReplicationTursoConfig>,
+
     /// Filesystem destination: a directory to replicate into. A second disk, an
     /// NFS/SSHFS mount or a bind-mounted volume is a legitimate offsite target.
-    /// Mutually exclusive with [`s3`](Self::s3).
+    /// Mutually exclusive with [`s3`](Self::s3) and [`turso`](Self::turso).
     #[serde(default)]
     pub path: Option<String>,
 }
@@ -1218,6 +1223,7 @@ impl Default for ReplicationConfig {
             prefix: None,
             allow_shared_bucket: false,
             s3: None,
+            turso: None,
             path: None,
         }
     }
@@ -1256,18 +1262,23 @@ impl ReplicationConfig {
         if !self.enabled {
             return errors;
         }
-        match (&self.s3, &self.path) {
-            (Some(_), Some(_)) => errors.push(
-                "[replication] configures both `s3` and `path`; pick exactly one destination"
-                    .to_owned(),
-            ),
-            (None, None) => errors.push(
+        match (&self.s3, &self.path, &self.turso) {
+            (None, None, None) => errors.push(
                 "[replication] enabled = true but no destination is configured; add a \
-                 [replication.s3] section (bucket/region/endpoint plus *_env credential \
+                 [replication.s3] or [replication.turso] section (with *_env credential \
                  indirection) or set `path` to a directory"
                     .to_owned(),
             ),
-            (Some(s3), None) => {
+            (Some(_), Some(_), None) => errors.push(
+                "[replication] configures both `s3` and `path`; pick exactly one destination"
+                    .to_owned(),
+            ),
+            (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => errors.push(
+                "[replication] configures multiple destinations; pick exactly one destination \
+                 (`s3`, `turso`, or `path`)"
+                    .to_owned(),
+            ),
+            (Some(s3), None, None) => {
                 if s3.bucket.as_deref().unwrap_or("").trim().is_empty() {
                     errors.push("[replication.s3] bucket is unset".to_owned());
                 }
@@ -1292,9 +1303,27 @@ impl ReplicationConfig {
                     );
                 }
             }
-            (None, Some(path)) => {
+            (None, Some(path), None) => {
                 if path.trim().is_empty() {
                     errors.push("[replication] path is empty".to_owned());
+                }
+            }
+            (None, None, Some(turso)) => {
+                if turso.url.as_deref().unwrap_or("").trim().is_empty() {
+                    errors.push("[replication.turso] url is unset".to_owned());
+                }
+                if turso
+                    .auth_token_env
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
+                {
+                    errors.push(
+                        "[replication.turso] needs auth_token_env (the NAME of the environment \
+                         variable the credential is read from — never the credential itself)"
+                            .to_owned(),
+                    );
                 }
             }
         }
@@ -1354,6 +1383,22 @@ pub struct ReplicationS3Config {
     /// Path-style addressing toggle (R2 / `MinIO` need this `true`).
     #[serde(default)]
     pub force_path_style: bool,
+}
+
+/// `[replication.turso]` — Turso / libSQL `/v2/pipeline` destination for
+/// continuous replication.
+///
+/// Same credential posture as `[replication.s3]`: the bearer token is named by
+/// environment variable (`auth_token_env`), never inlined into config, argv,
+/// logs, or errors.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ReplicationTursoConfig {
+    /// Target Turso database URL (`libsql://...`, `turso://...`, or `https://...`).
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Environment variable the Turso authentication token is read from.
+    #[serde(default)]
+    pub auth_token_env: Option<String>,
 }
 
 /// Default RPO: at most ten seconds of potential data loss (#1628 AC #2).
@@ -7933,6 +7978,8 @@ impl AutumnConfig {
             "AUTUMN_REPLICATION__S3__BUCKET",
             "AUTUMN_REPLICATION__S3__ACCESS_KEY_ID_ENV",
             "AUTUMN_REPLICATION__S3__SECRET_ACCESS_KEY_ENV",
+            "AUTUMN_REPLICATION__TURSO__URL",
+            "AUTUMN_REPLICATION__TURSO__AUTH_TOKEN_ENV",
             "AUTUMN_REPLICATION__PATH",
         ];
         // Only a REQUIRED S3 key materializes the sub-section, exactly as
@@ -7946,6 +7993,10 @@ impl AutumnConfig {
             "AUTUMN_REPLICATION__S3__BUCKET",
             "AUTUMN_REPLICATION__S3__ACCESS_KEY_ID_ENV",
             "AUTUMN_REPLICATION__S3__SECRET_ACCESS_KEY_ENV",
+        ];
+        const TURSO_KEYS: &[&str] = &[
+            "AUTUMN_REPLICATION__TURSO__URL",
+            "AUTUMN_REPLICATION__TURSO__AUTH_TOKEN_ENV",
         ];
         let has_dest_key = DEST_KEYS.iter().any(|k| env.var(k).is_ok());
         let enabled_truthy = env
@@ -7997,30 +8048,41 @@ impl AutumnConfig {
             &mut replication.allow_shared_bucket,
         );
 
-        if replication.s3.is_none() && !S3_KEYS.iter().any(|k| env.var(k).is_ok()) {
-            return;
+        if replication.s3.is_some() || S3_KEYS.iter().any(|k| env.var(k).is_ok()) {
+            let s3 = replication
+                .s3
+                .get_or_insert_with(ReplicationS3Config::default);
+            parse_env_option_string(env, "AUTUMN_REPLICATION__S3__BUCKET", &mut s3.bucket);
+            parse_env_option_string(env, "AUTUMN_REPLICATION__S3__REGION", &mut s3.region);
+            parse_env_option_string(env, "AUTUMN_REPLICATION__S3__ENDPOINT", &mut s3.endpoint);
+            parse_env_option_string(
+                env,
+                "AUTUMN_REPLICATION__S3__ACCESS_KEY_ID_ENV",
+                &mut s3.access_key_id_env,
+            );
+            parse_env_option_string(
+                env,
+                "AUTUMN_REPLICATION__S3__SECRET_ACCESS_KEY_ENV",
+                &mut s3.secret_access_key_env,
+            );
+            parse_env_bool(
+                env,
+                "AUTUMN_REPLICATION__S3__FORCE_PATH_STYLE",
+                &mut s3.force_path_style,
+            );
         }
-        let s3 = replication
-            .s3
-            .get_or_insert_with(ReplicationS3Config::default);
-        parse_env_option_string(env, "AUTUMN_REPLICATION__S3__BUCKET", &mut s3.bucket);
-        parse_env_option_string(env, "AUTUMN_REPLICATION__S3__REGION", &mut s3.region);
-        parse_env_option_string(env, "AUTUMN_REPLICATION__S3__ENDPOINT", &mut s3.endpoint);
-        parse_env_option_string(
-            env,
-            "AUTUMN_REPLICATION__S3__ACCESS_KEY_ID_ENV",
-            &mut s3.access_key_id_env,
-        );
-        parse_env_option_string(
-            env,
-            "AUTUMN_REPLICATION__S3__SECRET_ACCESS_KEY_ENV",
-            &mut s3.secret_access_key_env,
-        );
-        parse_env_bool(
-            env,
-            "AUTUMN_REPLICATION__S3__FORCE_PATH_STYLE",
-            &mut s3.force_path_style,
-        );
+
+        if replication.turso.is_some() || TURSO_KEYS.iter().any(|k| env.var(k).is_ok()) {
+            let turso = replication
+                .turso
+                .get_or_insert_with(ReplicationTursoConfig::default);
+            parse_env_option_string(env, "AUTUMN_REPLICATION__TURSO__URL", &mut turso.url);
+            parse_env_option_string(
+                env,
+                "AUTUMN_REPLICATION__TURSO__AUTH_TOKEN_ENV",
+                &mut turso.auth_token_env,
+            );
+        }
     }
 
     #[cfg(feature = "mail")]
@@ -16339,6 +16401,45 @@ path = "/healthz"
         assert!(replication.enabled, "env flips the TOML toggle");
         assert_eq!(replication.retention_hours, 24, "TOML value survives");
         assert_eq!(replication.path.as_deref(), Some("/from-toml"));
+    }
+
+    #[test]
+    fn replication_turso_parses_and_validates() {
+        let toml = r#"
+            [replication]
+            enabled = true
+            prefix = "db"
+
+            [replication.turso]
+            url = "libsql://myapp-org.turso.io"
+            auth_token_env = "TURSO_AUTH_TOKEN"
+        "#;
+        let config: AutumnConfig = toml::from_str(toml).expect("parse");
+        let replication = *config.replication.expect("section present");
+        assert!(
+            replication.validation_errors().is_empty(),
+            "{:?}",
+            replication.validation_errors()
+        );
+        let turso = replication.turso.expect("turso destination");
+        assert_eq!(turso.url.as_deref(), Some("libsql://myapp-org.turso.io"));
+        assert_eq!(turso.auth_token_env.as_deref(), Some("TURSO_AUTH_TOKEN"));
+
+        let env = MockEnv::new()
+            .with("AUTUMN_REPLICATION__ENABLED", "true")
+            .with("AUTUMN_REPLICATION__TURSO__URL", "https://turso.test:8080")
+            .with("AUTUMN_REPLICATION__TURSO__AUTH_TOKEN_ENV", "TURSO_TOKEN");
+        let mut from_env = AutumnConfig::default();
+        from_env.apply_env_overrides_with_env(&env);
+        let repl_env = *from_env.replication.expect("materialized from turso env");
+        assert!(repl_env.s3.is_none());
+        assert!(repl_env.validation_errors().is_empty());
+        let turso_env = repl_env.turso.expect("turso from env");
+        assert_eq!(
+            turso_env.url.as_deref(),
+            Some("https://turso.test:8080")
+        );
+        assert_eq!(turso_env.auth_token_env.as_deref(), Some("TURSO_TOKEN"));
     }
 
     #[test]
