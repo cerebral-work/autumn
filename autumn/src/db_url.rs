@@ -469,7 +469,11 @@ fn secrets_in(url: &str) -> Vec<String> {
 
 fn is_password_key(key: &str) -> bool {
     let key = key.trim();
-    key.eq_ignore_ascii_case("password") || key.eq_ignore_ascii_case("sslpassword")
+    key.eq_ignore_ascii_case("password")
+        || key.eq_ignore_ascii_case("sslpassword")
+        || key.eq_ignore_ascii_case("authtoken")
+        || key.eq_ignore_ascii_case("auth_token")
+        || key.eq_ignore_ascii_case("token")
 }
 
 /// Redact every database target embedded in a free-text message.
@@ -956,6 +960,31 @@ mod tests {
                 r#"end of string reached when looking for matching "]" in URI: "postgres://app:hunter2@[::1/db""#
             ),
             r#"end of string reached when looking for matching "]" in URI: "****""#
+        );
+    }
+
+    #[test]
+    fn turso_and_libsql_targets_and_driver_errors_are_redacted() {
+        assert_eq!(
+            redact_target("libsql://my-db-org.turso.io?authToken=eyJhbGciOiJFZERTQSI"),
+            "libsql://my-db-org.turso.io?****"
+        );
+        assert_eq!(
+            redact_target("turso://user:turso-secret@my-db-org.turso.io"),
+            "turso://user:****@my-db-org.turso.io"
+        );
+        let url = "libsql://my-db-org.turso.io?authToken=turso-jwt-secret-99";
+        let driver_err = redact_driver_error(
+            r#"libsql handshake rejected token "turso-jwt-secret-99" on libsql://my-db-org.turso.io?authToken=turso-jwt-secret-99"#,
+            url,
+        );
+        assert!(
+            !driver_err.contains("turso-jwt-secret-99"),
+            "Turso authToken must be stripped from driver errors: {driver_err}"
+        );
+        assert!(
+            driver_err.contains("libsql://my-db-org.turso.io?****"),
+            "Redacted target must remain legible: {driver_err}"
         );
     }
 }

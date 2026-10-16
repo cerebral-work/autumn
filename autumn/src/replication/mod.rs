@@ -52,6 +52,8 @@ pub mod s3;
 pub mod segment;
 pub mod sqlite;
 pub mod status;
+#[cfg(feature = "http-client")]
+pub mod turso;
 pub mod wal;
 
 use std::fmt;
@@ -398,12 +400,16 @@ fn canonical_authority(endpoint: Option<&str>) -> Option<String> {
 }
 
 /// Read a credential from the environment variable config *names*.
-fn credential_from_env(var: Option<&String>, field: &str) -> Result<String, SetupError> {
+fn credential_from_env(
+    section: &str,
+    var: Option<&String>,
+    field: &str,
+) -> Result<String, SetupError> {
     let name = var
         .map(String::as_str)
         .filter(|v| !v.trim().is_empty())
         .ok_or_else(|| SetupError::Config {
-            errors: vec![format!("[replication.s3] {field} is unset")],
+            errors: vec![format!("[{section}] {field} is unset")],
         })?;
     let value = std::env::var(name).unwrap_or_default();
     if value.trim().is_empty() {
@@ -416,8 +422,8 @@ fn credential_from_env(var: Option<&String>, field: &str) -> Result<String, Setu
 
 /// Build the destination named by `config`.
 ///
-/// Must be called from a blocking thread: the S3 destination uses a blocking
-/// HTTP client (see the `s3` module).
+/// Must be called from a blocking thread: the S3 and Turso destinations use a
+/// blocking HTTP client (see the `s3` and `turso` modules).
 ///
 /// # Errors
 ///
@@ -428,6 +434,43 @@ pub fn build_destination(
 ) -> Result<Arc<dyn ReplicaDestination>, SetupError> {
     if let Some(path) = config.path.as_ref().filter(|p| !p.trim().is_empty()) {
         return Ok(Arc::new(FileDestination::new(path.trim())?));
+    }
+    if let Some(turso) = config.turso.as_ref() {
+        let url = turso
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .ok_or_else(|| SetupError::Config {
+                errors: vec!["[replication.turso] url is unset".to_owned()],
+            })?;
+        #[cfg(feature = "http-client")]
+        {
+            let auth_token = credential_from_env(
+                "replication.turso",
+                turso.auth_token_env.as_ref(),
+                "auth_token_env",
+            )?;
+            let settings = turso::TursoSettings {
+                url: url.to_owned(),
+            };
+            let credentials = turso::TursoCredentials { auth_token };
+            return Ok(Arc::new(turso::TursoDestination::new(
+                settings,
+                credentials,
+            )?));
+        }
+        #[cfg(not(feature = "http-client"))]
+        {
+            let _ = url;
+            return Err(SetupError::Config {
+                errors: vec![
+                    "[replication.turso] needs the `http-client` feature; this build of autumn-web \
+                     was compiled without it. Use a `path` destination, or enable the feature."
+                        .to_owned(),
+                ],
+            });
+        }
     }
     let Some(s3) = config.s3.as_ref() else {
         return Err(SetupError::Config {
@@ -460,8 +503,13 @@ pub fn build_destination(
     #[cfg(feature = "http-client")]
     {
         let credentials = s3::S3Credentials {
-            access_key_id: credential_from_env(s3.access_key_id_env.as_ref(), "access_key_id_env")?,
+            access_key_id: credential_from_env(
+                "replication.s3",
+                s3.access_key_id_env.as_ref(),
+                "access_key_id_env",
+            )?,
             secret_access_key: credential_from_env(
+                "replication.s3",
                 s3.secret_access_key_env.as_ref(),
                 "secret_access_key_env",
             )?,
