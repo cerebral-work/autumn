@@ -1480,7 +1480,7 @@ impl HomeRoutes {
     not(all(feature = "openapi", feature = "mcp")),
     allow(clippy::needless_pass_by_value, unused_variables)
 )]
-fn build_aeo_site<O: AeoOpenApiFacts, M: AeoMcpFacts>(
+pub fn build_aeo_site<O: AeoOpenApiFacts, M: AeoMcpFacts>(
     config: &AutumnConfig,
     state: &AppState,
     route_list: &[Route],
@@ -1507,6 +1507,7 @@ fn build_aeo_site<O: AeoOpenApiFacts, M: AeoMcpFacts>(
         .filter(|r| r.method == http::Method::GET)
         .filter_map(|r| page(r.path.to_owned(), r.seo))
         .collect();
+    let api_endpoints = collect_aeo_api_endpoints(route_list, scoped_groups);
     // With locale-prefixed routing the top-level routes are served under
     // `/{locale}` and the bare paths only redirect: list the localized pages,
     // as the `[seo]` sitemap does. Scoped groups mount outside the locale
@@ -1578,6 +1579,7 @@ fn build_aeo_site<O: AeoOpenApiFacts, M: AeoMcpFacts>(
     home_paths.dedup();
     let mut facts = SiteFacts {
         pages,
+        api_endpoints,
         home_paths,
         noindex_homes,
         no_home: !has_home,
@@ -1601,9 +1603,84 @@ fn build_aeo_site<O: AeoOpenApiFacts, M: AeoMcpFacts>(
     crate::aeo::AeoSite::new(config, facts)
 }
 
+/// Collect non-hidden API route descriptors for `llms.txt` in deterministic
+/// `(path, method)` order.
+fn collect_aeo_api_endpoints(
+    route_list: &[Route],
+    scoped_groups: &[ScopedGroup],
+) -> Vec<crate::aeo::documents::ApiEndpointFacts> {
+    use crate::aeo::documents::ApiEndpointFacts;
+
+    let api_endpoint = |path: String, route: &Route| {
+        let doc = &route.api_doc;
+        if doc.hidden
+            || doc.method.is_empty()
+            || route
+                .seo
+                .robots
+                .is_some_and(crate::seo::robots_directive_is_noindex)
+        {
+            return None;
+        }
+        // Static `GET` pages with `seo(title)` and no API schema/summary/MCP
+        // metadata are already listed under `## Pages`; avoid duplicating them.
+        let listed_as_page = route.method == http::Method::GET
+            && route.seo.title.is_some()
+            && !path.contains('{')
+            && !path.contains('*')
+            && doc.request_body.is_none()
+            && doc.response.is_none()
+            && doc.query_schema.is_none()
+            && doc.summary.is_none()
+            && !doc.mcp_tool;
+        if listed_as_page {
+            return None;
+        }
+        Some(ApiEndpointFacts {
+            method: doc.method.to_owned(),
+            path,
+            summary: doc
+                .summary
+                .or(doc.description)
+                .map(str::to_owned)
+                .filter(|s| !s.trim().is_empty()),
+            public: doc.public,
+            secured: doc.secured
+                || doc.has_policy
+                || route.repository.is_some_and(|r| r.has_policy),
+            mcp_tool: doc.mcp_tool && !doc.mcp_exclude,
+        })
+    };
+
+    let mut api_endpoints: Vec<ApiEndpointFacts> = route_list
+        .iter()
+        .filter_map(|r| {
+            let raw = if r.api_doc.path.is_empty() {
+                r.path
+            } else {
+                r.api_doc.path
+            };
+            api_endpoint(raw.to_owned(), r)
+        })
+        .collect();
+    for group in scoped_groups {
+        api_endpoints.extend(group.routes.iter().filter_map(|r| {
+            let raw = if r.api_doc.path.is_empty() {
+                r.path
+            } else {
+                r.api_doc.path
+            };
+            api_endpoint(join_nested_path(&group.prefix, raw), r)
+        }));
+    }
+    api_endpoints.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.method.cmp(&b.method)));
+    api_endpoints.dedup_by(|a, b| a.path == b.path && a.method == b.method);
+    api_endpoints
+}
+
 /// Copies what AEO needs from the `OpenAPI` config. A trait so
 /// [`build_aeo_site`] compiles without the `openapi` feature.
-trait AeoOpenApiFacts {
+pub trait AeoOpenApiFacts {
     fn fill(&self, facts: &mut crate::aeo::documents::SiteFacts);
 }
 
@@ -1625,7 +1702,7 @@ impl AeoOpenApiFacts for crate::openapi::OpenApiConfig {
 }
 
 /// Copies what AEO needs from the prepared MCP endpoint.
-trait AeoMcpFacts {
+pub trait AeoMcpFacts {
     fn fill(&self, facts: &mut crate::aeo::documents::SiteFacts);
 }
 

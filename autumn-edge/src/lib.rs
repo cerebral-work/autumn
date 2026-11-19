@@ -131,7 +131,7 @@ pub use handler::{EdgeExtract, EdgeHandler, EdgeLeaf, edge_get};
 pub use identity::{EdgeIdentity, EdgeIdentityRequired, EdgeRole, EdgeUserId};
 pub use kv::{EdgeKv, EmptyEdgeKv, InMemoryEdgeKv};
 pub use route::{EdgeCapability, EdgeRoute, EdgeState};
-pub use router::{CapabilityProbe, build_edge_router};
+pub use router::{CapabilityProbe, LLMS_TXT_PATH, build_edge_router};
 pub use runtime::{serve, serve_io, strip_request_credentials};
 pub use wire::{
     EdgeOutcome, EdgeRequest, EdgeResponse, FALLTHROUGH_SENTINEL, FallthroughReason,

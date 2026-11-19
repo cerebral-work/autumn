@@ -442,9 +442,11 @@ fn normalize_turso_url(raw: &str) -> Result<(String, String), DestinationError> 
             ),
         });
     }
-    let host = parsed.host_str().ok_or_else(|| DestinationError::Rejected {
-        detail: "replication.turso.url has no host".to_owned(),
-    })?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| DestinationError::Rejected {
+            detail: "replication.turso.url has no host".to_owned(),
+        })?;
     let authority = parsed
         .port()
         .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"));

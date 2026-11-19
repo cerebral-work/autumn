@@ -684,6 +684,7 @@ pub fn admin_layout(
         format!("{actuator_prefix}/ui"),
         "Actuator",
     ));
+    let llms_href = format!("{}/llms.txt", prefix.trim_end_matches('/'));
     let sidebar_nav = NavBarConfig::new()
         .brand_html(html! { "🍂 Autumn Admin" }, None)
         .items(nav_items)
@@ -697,6 +698,7 @@ pub fn admin_layout(
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
+                link rel="describedby" type="text/plain" href=(llms_href);
                 // CSRF token for HTMX requests (hx-delete, hx-post). The
                 // companion `js/autumn-htmx-csrf.js` script reads this meta tag
                 // and attaches the configured header to outgoing htmx requests.

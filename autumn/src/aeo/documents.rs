@@ -37,6 +37,8 @@ pub const OAUTH_SERVER_PATH: &str = "/.well-known/oauth-authorization-server";
 pub const AUTH_MD_PATH: &str = "/auth.md";
 /// Name of the generated agent skill.
 pub const SITE_GUIDE_SKILL: &str = "site-guide";
+/// Maximum inline API endpoints rendered in `llms.txt` before truncating.
+pub const LLMS_TXT_MAX_API_ENDPOINTS: usize = 50;
 
 /// What the app has, captured once at router build time.
 #[derive(Debug, Clone, Default)]
@@ -55,6 +57,8 @@ pub struct SiteFacts {
     pub health_path: Option<String>,
     /// Pages for `llms.txt`: `GET` routes that declare a `seo(title)`.
     pub pages: Vec<PageFacts>,
+    /// Non-hidden API routes for `llms.txt`, sorted deterministically.
+    pub api_endpoints: Vec<ApiEndpointFacts>,
     /// Skills the app registered.
     pub skills: Vec<AgentSkill>,
     /// Publish the generated `site-guide` skill.
@@ -145,6 +149,24 @@ pub struct PageFacts {
     pub title: String,
     /// `seo(description)`.
     pub description: Option<String>,
+}
+
+/// One non-hidden API endpoint for `llms.txt`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ApiEndpointFacts {
+    /// Uppercase HTTP method (`"GET"`, `"POST"`, ...).
+    pub method: String,
+    /// Route path template (`"/v1/tasks/{id}"`).
+    pub path: String,
+    /// Short summary (`#[api_doc(summary = ...)]`), when declared.
+    pub summary: Option<String>,
+    /// `true` when explicitly marked `#[public]`.
+    pub public: bool,
+    /// `true` when guarded by `#[secured]` or `#[authorize]`.
+    pub secured: bool,
+    /// `true` when exposed as an MCP tool (`#[api_doc(mcp)]`).
+    pub mcp_tool: bool,
 }
 
 /// An agent skill: one `SKILL.md` file.
@@ -719,6 +741,7 @@ fn llms_txt(facts: &SiteFacts, origin: &Origin) -> Option<Document> {
             out.push('\n');
         }
     }
+    write_llms_txt_api_endpoints(&mut out, facts, origin);
     out.push_str("\n## Agents\n\n");
     if let Some(mcp) = &facts.mcp {
         let _ = writeln!(
@@ -766,6 +789,51 @@ fn llms_txt(facts: &SiteFacts, origin: &Origin) -> Option<Document> {
         headers: Vec::new(),
         body: out,
     })
+}
+
+fn write_llms_txt_api_endpoints(out: &mut String, facts: &SiteFacts, origin: &Origin) {
+    if facts.api_endpoints.is_empty() {
+        return;
+    }
+    let text = |s: &str| super::markdown::escape_inline(&one_line(s));
+    let dest = |path: &str| super::markdown::link_destination(&origin.url(path));
+    let code = |s: &str| one_line(s).replace('`', "");
+    out.push_str("\n## API Endpoints\n\n");
+    for ep in facts.api_endpoints.iter().take(LLMS_TXT_MAX_API_ENDPOINTS) {
+        let _ = write!(out, "- `{} {}`", code(&ep.method), code(&ep.path));
+        if let Some(s) = ep.summary.as_deref().filter(|s| !s.trim().is_empty()) {
+            let _ = write!(out, ": {}", text(s));
+        }
+        let mut tags = Vec::new();
+        if ep.secured {
+            tags.push("auth required");
+        } else if ep.public {
+            tags.push("public");
+        }
+        if ep.mcp_tool {
+            tags.push("mcp tool");
+        }
+        if !tags.is_empty() {
+            let _ = write!(out, " ({})", tags.join(", "));
+        }
+        out.push('\n');
+    }
+    if let Some(remaining) = facts
+        .api_endpoints
+        .len()
+        .checked_sub(LLMS_TXT_MAX_API_ENDPOINTS)
+        .filter(|&n| n > 0)
+    {
+        if let Some(api) = &facts.openapi {
+            let _ = writeln!(
+                out,
+                "- ... and {remaining} more endpoints; see [OpenAPI]({}) for the full specification.",
+                dest(&api.json_path)
+            );
+        } else {
+            let _ = writeln!(out, "- ... and {remaining} more endpoints.");
+        }
+    }
 }
 
 fn one_line(s: &str) -> String {
@@ -2114,6 +2182,89 @@ mod tests {
         assert!(doc.body.starts_with("# shop.example.com\n"), "{}", doc.body);
         facts.llms_txt = false;
         assert!(render(&facts, &origin(), LLMS_TXT_PATH).is_none());
+    }
+
+    #[test]
+    fn llms_txt_renders_api_endpoints_for_service_only_apps() {
+        let facts = SiteFacts {
+            name: Some("Orchestrator API".to_owned()),
+            description: Some("Control plane service.".to_owned()),
+            pages: Vec::new(),
+            no_home: true,
+            markdown: false,
+            llms_txt: true,
+            api_endpoints: vec![
+                ApiEndpointFacts {
+                    method: "GET".to_owned(),
+                    path: "/v1/jobs".to_owned(),
+                    summary: Some("List queued [jobs](https://evil.example)".to_owned()),
+                    public: false,
+                    secured: true,
+                    mcp_tool: true,
+                },
+                ApiEndpointFacts {
+                    method: "POST".to_owned(),
+                    path: "/v1/jobs".to_owned(),
+                    summary: None,
+                    public: true,
+                    secured: false,
+                    mcp_tool: false,
+                },
+            ],
+            ..SiteFacts::default()
+        };
+        let doc = render(&facts, &origin(), LLMS_TXT_PATH).unwrap();
+        assert!(!doc.body.contains("## Pages"), "{}", doc.body);
+        assert!(doc.body.contains("\n## API Endpoints\n\n"), "{}", doc.body);
+        assert!(
+            doc.body.contains(
+                r"- `GET /v1/jobs`: List queued \[jobs\](https://evil.example) (auth required, mcp tool)"
+            ),
+            "{}",
+            doc.body
+        );
+        assert!(
+            doc.body.contains("- `POST /v1/jobs` (public)\n"),
+            "{}",
+            doc.body
+        );
+    }
+
+    #[test]
+    fn llms_txt_truncates_large_api_endpoint_lists_and_links_openapi() {
+        let endpoints: Vec<ApiEndpointFacts> = (0..55)
+            .map(|i| ApiEndpointFacts {
+                method: "GET".to_owned(),
+                path: format!("/v1/items/{i:02}"),
+                summary: Some(format!("Fetch item {i}")),
+                public: true,
+                secured: false,
+                mcp_tool: false,
+            })
+            .collect();
+        let mut with_openapi = api_site();
+        with_openapi.pages.clear();
+        with_openapi.api_endpoints.clone_from(&endpoints);
+        let doc = render(&with_openapi, &origin(), LLMS_TXT_PATH).unwrap();
+        assert!(doc.body.contains("`GET /v1/items/00`"), "{}", doc.body);
+        assert!(doc.body.contains("`GET /v1/items/49`"), "{}", doc.body);
+        assert!(!doc.body.contains("`GET /v1/items/50`"), "{}", doc.body);
+        assert!(
+            doc.body.contains(
+                "- ... and 5 more endpoints; see [OpenAPI](https://shop.example.com/openapi.json) for the full specification."
+            ),
+            "{}",
+            doc.body
+        );
+
+        let mut without_openapi = with_openapi;
+        without_openapi.openapi = None;
+        let plain = render(&without_openapi, &origin(), LLMS_TXT_PATH).unwrap();
+        assert!(
+            plain.body.contains("- ... and 5 more endpoints.\n"),
+            "{}",
+            plain.body
+        );
     }
 
     // ── API catalog ─────────────────────────────────────────────────────

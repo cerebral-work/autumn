@@ -7,6 +7,9 @@
 //! encoding, trailing slashes, `{param}` capture and `%2F` in a segment all
 //! behave identically because it is literally the same matcher.
 
+use std::fmt::Write as _;
+use std::sync::Arc;
+
 use axum::Router;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -16,7 +19,15 @@ use tower::ServiceExt as _;
 use crate::route::{EdgeCapability, EdgeRoute, EdgeState};
 use crate::wire::{FALLTHROUGH_SENTINEL, FallthroughReason};
 
+/// Path of the built-in edge `llms.txt` discovery document.
+pub const LLMS_TXT_PATH: &str = "/llms.txt";
+
 /// Assemble the edge lane router.
+///
+/// When no route registers [`LLMS_TXT_PATH`], a built-in `GET /llms.txt`
+/// discovery endpoint is mounted automatically (`text/plain; charset=utf-8`,
+/// `X-Content-Type-Options: nosniff`) summarizing the edge service and its
+/// registered routes. An explicit route at `/llms.txt` always wins.
 ///
 /// The fallback answers an unmatched path with the fallthrough sentinel, so
 /// "no such edge route" is reported through the same one channel every other
@@ -36,6 +47,8 @@ use crate::wire::{FALLTHROUGH_SENTINEL, FallthroughReason};
 /// always sets `GET`, but hand-construction is allowed, so this catches a
 /// route built with the wrong method before it reaches a capsule.
 pub fn build_edge_router(routes: Vec<EdgeRoute>) -> Router<()> {
+    let llms_body = (!routes.iter().any(|route| route.path == LLMS_TXT_PATH))
+        .then(|| Arc::<str>::from(render_edge_llms_txt(&routes)));
     let mut lane: Router<EdgeState> = Router::new();
     for route in routes {
         assert!(
@@ -46,7 +59,57 @@ pub fn build_edge_router(routes: Vec<EdgeRoute>) -> Router<()> {
         );
         lane = lane.route(route.path, route.handler);
     }
+    if let Some(body) = llms_body {
+        lane = lane.route(
+            LLMS_TXT_PATH,
+            get(move || {
+                let body = Arc::clone(&body);
+                async move { edge_llms_txt(&body) }
+            }),
+        );
+    }
     lane.fallback(unknown_route).with_state(EdgeState)
+}
+
+fn edge_llms_txt(body: &str) -> Response {
+    (
+        StatusCode::OK,
+        [
+            (http::header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        body.to_owned(),
+    )
+        .into_response()
+}
+
+fn render_edge_llms_txt(routes: &[EdgeRoute]) -> String {
+    let mut sorted: Vec<(&str, &str, &str, &[EdgeCapability])> = routes
+        .iter()
+        .map(|route| (route.path, route.method.as_str(), route.name, route.needs))
+        .collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
+    sorted.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+
+    let mut out = String::from(
+        "# Autumn Edge\n\n\
+         > Portable read-path edge lane (`wasm32-wasip1`) with origin fallthrough.\n",
+    );
+    if !sorted.is_empty() {
+        out.push_str("\n## Edge Routes\n\n");
+        for (path, method, name, needs) in sorted {
+            let _ = write!(out, "- `{method} {path}`");
+            if !name.trim().is_empty() {
+                let _ = write!(out, ": `{name}`");
+            }
+            if !needs.is_empty() {
+                let caps = encode_needs(needs);
+                let _ = write!(out, " (needs: {caps})");
+            }
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// The 404 fallback: decline with [`FallthroughReason::UnknownRoute`].
@@ -84,10 +147,14 @@ impl CapabilityProbe {
     /// Same duplicate-path panic as [`build_edge_router`], on the same input.
     #[must_use]
     pub fn new(routes: &[EdgeRoute]) -> Self {
+        let has_llms_txt = routes.iter().any(|route| route.path == LLMS_TXT_PATH);
         let mut lane: Router<()> = Router::new();
         for route in routes {
             let needs = route.needs;
             lane = lane.route(route.path, get(move || async move { encode_needs(needs) }));
+        }
+        if !has_llms_txt {
+            lane = lane.route(LLMS_TXT_PATH, get(|| async { String::new() }));
         }
         Self {
             router: lane.fallback(|| async { StatusCode::NOT_FOUND }),
@@ -264,5 +331,56 @@ mod tests {
             .expect("panic payload is a string");
         assert!(message.contains("submit"), "{message}");
         assert!(message.contains("POST"), "{message}");
+    }
+
+    #[test]
+    fn llms_txt_is_served_automatically_when_not_registered() {
+        let router = build_edge_router(routes());
+        let (status, headers, body) = call(&router, "/llms.txt");
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            headers.contains(&(
+                "content-type".to_owned(),
+                "text/plain; charset=utf-8".to_owned()
+            )),
+            "{headers:?}"
+        );
+        assert!(
+            headers.contains(&("x-content-type-options".to_owned(), "nosniff".to_owned())),
+            "{headers:?}"
+        );
+        assert!(body.starts_with("# Autumn Edge\n"), "{body}");
+        assert!(
+            body.contains("- `GET /greet/{name}`: `greet` (needs: kv)"),
+            "{body}"
+        );
+        assert!(body.contains("- `GET /stats`: `stats`\n"), "{body}");
+
+        let probe = CapabilityProbe::new(&routes());
+        assert_eq!(probe.needs("/llms.txt"), Some(vec![]));
+    }
+
+    #[test]
+    fn explicit_llms_txt_route_overrides_builtin_default() {
+        async fn custom_llms() -> &'static str {
+            "# Custom Edge\n"
+        }
+
+        let mut custom = routes();
+        custom.push(EdgeRoute {
+            method: http::Method::GET,
+            path: "/llms.txt",
+            handler: edge_get(custom_llms),
+            name: "custom_llms",
+            needs: &[EdgeCapability::Kv],
+        });
+
+        let probe = CapabilityProbe::new(&custom);
+        assert_eq!(probe.needs("/llms.txt"), Some(vec![EdgeCapability::Kv]));
+
+        let router = build_edge_router(custom);
+        let (status, _, body) = call(&router, "/llms.txt");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "# Custom Edge\n");
     }
 }
