@@ -397,6 +397,11 @@ impl AeoSite {
             mcp.public_tools = false;
             mcp.tools.clear();
         }
+        if !aeo.publish_tools || facts.mcp.as_ref().is_some_and(|mcp| !mcp.public_tools) {
+            for ep in &mut facts.api_endpoints {
+                ep.mcp_tool = false;
+            }
+        }
         facts.robots_txt = aeo.enabled.then(|| default_robots_txt(config));
         facts.sitemap = aeo.enabled;
         warn_on_config(config);
@@ -1397,5 +1402,108 @@ mod tests {
             .unwrap();
         // Only the script, which holds no absolute URL.
         assert_eq!(written, [webmcp::WEBMCP_JS_PATH], "{written:?}");
+    }
+
+    #[test]
+    fn build_aeo_site_populates_service_api_endpoints_and_respects_visibility() {
+        use crate::openapi::ApiDoc;
+        use crate::route::{Route, RouteIdempotency, RouteTimeout};
+
+        fn test_route(method: http::Method, path: &'static str, doc: ApiDoc) -> Route {
+            Route {
+                method,
+                path,
+                handler: axum::routing::get(|| async { "ok" }),
+                name: "test_handler",
+                api_doc: doc,
+                api_version: None,
+                sunset_opt_out: false,
+                repository: None,
+                idempotency: RouteIdempotency::Direct,
+                timeout: RouteTimeout::Inherit,
+                criticality: crate::admission::Criticality::Default,
+                seo: crate::seo::SeoRouteDefaults::EMPTY,
+            }
+        }
+
+        let list_doc = ApiDoc {
+            method: "GET",
+            path: "/v1/runs",
+            summary: Some("List orchestrator runs"),
+            secured: true,
+            mcp_tool: true,
+            ..ApiDoc::default()
+        };
+
+        let create_doc = ApiDoc {
+            method: "POST",
+            path: "/v1/runs",
+            public: true,
+            ..ApiDoc::default()
+        };
+
+        let hidden_doc = ApiDoc {
+            method: "GET",
+            path: "/internal/debug",
+            hidden: true,
+            ..ApiDoc::default()
+        };
+
+        let scoped_doc = ApiDoc {
+            method: "DELETE",
+            path: "/{id}",
+            summary: Some("Cancel run"),
+            secured: true,
+            ..ApiDoc::default()
+        };
+
+        let routes = vec![
+            test_route(http::Method::POST, "/v1/runs", create_doc),
+            test_route(http::Method::GET, "/internal/debug", hidden_doc),
+            test_route(http::Method::GET, "/v1/runs", list_doc),
+        ];
+        let scoped = vec![crate::app::ScopedGroup {
+            prefix: "/v1/runs".to_owned(),
+            routes: vec![test_route(http::Method::DELETE, "/{id}", scoped_doc)],
+            source: crate::route_listing::RouteSource::User,
+            apply_layer: Box::new(|r| r),
+        }];
+
+        let mut config = crate::config::AutumnConfig::default();
+        let state = crate::state::AppState::for_test();
+        let site = crate::router::build_aeo_site::<(), ()>(
+            &config, &state, &routes, &scoped, false, None, None,
+        );
+        assert!(site.facts.pages.is_empty());
+        assert_eq!(
+            site.facts
+                .api_endpoints
+                .iter()
+                .map(|e| (e.method.as_str(), e.path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("GET", "/v1/runs"),
+                ("POST", "/v1/runs"),
+                ("DELETE", "/v1/runs/{id}"),
+            ]
+        );
+        let origin = documents::Origin::resolve(Some("https://api.example.com"), None);
+        let doc = documents::render(&site.facts, &origin, documents::LLMS_TXT_PATH).unwrap();
+        assert!(
+            doc.body
+                .contains("- `GET /v1/runs`: List orchestrator runs (auth required, mcp tool)"),
+            "{}",
+            doc.body
+        );
+        assert!(!doc.body.contains("/internal/debug"), "{}", doc.body);
+
+        // Disabling `publish_tools` strips `(mcp tool)` annotations from `/llms.txt`.
+        config.aeo.publish_tools = false;
+        let masked = crate::router::build_aeo_site::<(), ()>(
+            &config, &state, &routes, &scoped, false, None, None,
+        );
+        let masked_doc =
+            documents::render(&masked.facts, &origin, documents::LLMS_TXT_PATH).unwrap();
+        assert!(!masked_doc.body.contains("mcp tool"), "{}", masked_doc.body);
     }
 }

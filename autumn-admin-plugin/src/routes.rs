@@ -210,8 +210,9 @@ pub fn admin_router(
     let actor_session_key = auth_session_key.clone();
 
     let mut router = axum::Router::new()
-        // Dashboard
+        // Dashboard & agent discovery
         .route("/", routing::get(dashboard))
+        .route("/llms.txt", routing::get(admin_llms_txt))
         .route("/jobs", routing::get(jobs_dashboard))
         .route("/jobs/counters", routing::get(jobs_counters))
         .route("/jobs/{id}/retry", routing::post(job_retry))
@@ -587,10 +588,102 @@ async fn dashboard(
     let counts = join_all(futures).await;
     let messages = flash.consume().await;
 
-    Ok(render(templates::dashboard_page(
-        &ctx.chrome(&messages),
-        &counts,
-    )))
+    let mut resp = render(templates::dashboard_page(&ctx.chrome(&messages), &counts));
+    let link_val = format!(
+        "<{}/llms.txt>; rel=\"describedby\"; type=\"text/plain\"",
+        ctx.prefix.trim_end_matches('/')
+    );
+    if let Ok(header_val) = axum::http::HeaderValue::from_str(&link_val) {
+        resp.headers_mut().insert(header::LINK, header_val);
+    }
+    Ok(resp)
+}
+
+/// `GET /admin/llms.txt` — Plain-text discovery summary of the admin panel and
+/// its registered model CRUD surfaces, behind the same auth boundary as `/admin`.
+async fn admin_llms_txt(
+    axum::Extension(registry): axum::Extension<Arc<AdminRegistry>>,
+    axum::Extension(AdminPrefix(prefix)): axum::Extension<AdminPrefix>,
+    axum::Extension(ActuatorPrefix(actuator_prefix)): axum::Extension<ActuatorPrefix>,
+    axum::Extension(HasRuntimeConfig(show_config)): axum::Extension<HasRuntimeConfig>,
+) -> Response {
+    let body = render_admin_llms_txt(&registry, &prefix, &actuator_prefix, show_config);
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+fn render_admin_llms_txt(
+    registry: &AdminRegistry,
+    prefix: &str,
+    actuator_prefix: &str,
+    show_config: bool,
+) -> String {
+    use std::fmt::Write as _;
+
+    let base = prefix.trim_end_matches('/');
+    let admin_root = if base.is_empty() { "/" } else { base };
+    let actuator_base = actuator_prefix.trim_end_matches('/');
+    let mut out = String::from(
+        "# Autumn Admin\n\n\
+         > Server-rendered CRUD administration, background jobs, and audit surfaces.\n\n\
+         ## System Surfaces\n\n",
+    );
+    let _ = writeln!(out, "- `GET {admin_root}`: Admin dashboard");
+    let _ = writeln!(out, "- `GET {base}/jobs`: Background jobs dashboard");
+    if show_config {
+        let _ = writeln!(out, "- `GET {base}/config`: Runtime configuration");
+    }
+    let _ = writeln!(out, "- `GET {actuator_base}/ui`: Actuator dashboard");
+
+    if registry.model_count() > 0 {
+        out.push_str("\n## Registered Models\n");
+        for (slug, model) in registry.iter() {
+            let _ = writeln!(out, "\n### {} (`{slug}`)\n", model.display_name_plural());
+            let _ = writeln!(
+                out,
+                "- `GET {base}/{slug}` / `POST {base}/{slug}`: List and create {}",
+                model.display_name_plural()
+            );
+            let _ = writeln!(
+                out,
+                "- `GET {base}/{slug}/new`: Create {} form",
+                model.display_name()
+            );
+            let _ = writeln!(
+                out,
+                "- `GET {base}/{slug}/{{id}}` / `POST {base}/{slug}/{{id}}` / `DELETE {base}/{slug}/{{id}}`: View, update, and delete {}",
+                model.display_name()
+            );
+            let _ = writeln!(
+                out,
+                "- `GET {base}/{slug}/{{id}}/edit`: Edit {} form",
+                model.display_name()
+            );
+            let _ = writeln!(
+                out,
+                "- `GET {base}/{slug}/{{id}}/history`: Audit and version history{}",
+                if model.has_history() {
+                    ""
+                } else {
+                    " (when enabled on model)"
+                }
+            );
+            let _ = writeln!(out, "- `POST {base}/{slug}/actions`: Bulk model actions");
+            let _ = writeln!(out, "- `GET {base}/{slug}/export.csv`: Export CSV");
+            let _ = writeln!(
+                out,
+                "- `GET {base}/{slug}/import` / `POST {base}/{slug}/import`: Import CSV"
+            );
+        }
+    }
+    out
 }
 
 /// `GET /admin/jobs` -- built-in background jobs dashboard.
@@ -2723,6 +2816,172 @@ mod tests {
         assert_eq!(
             extract_reveal_cookie(&headers).as_deref(),
             Some("supersecret")
+        );
+    }
+
+    // ── /admin/llms.txt surface & auth boundary ──────────────────────────────
+
+    #[tokio::test]
+    async fn admin_llms_txt_lists_models_crud_routes_and_headers() {
+        use crate::registry::tests::DummyModel;
+        use tower::ServiceExt as _;
+
+        let mut registry = AdminRegistry::new();
+        registry.register(DummyModel {
+            slug: "projects",
+            name: "Project",
+        });
+        registry.register(DummyModel {
+            slug: "tickets",
+            name: "Ticket",
+        });
+        let router = admin_router(
+            Arc::new(registry),
+            "/admin",
+            "/actuator".to_owned(),
+            AdminGuards {
+                auth_session_key: "user_id".to_owned(),
+                require_role: None,
+                step_up_mutations: false,
+                step_up_max_age_secs: 300,
+            },
+            None,
+            false,
+        )
+        .with_state(AppState::for_test());
+
+        let resp = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/llms.txt")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            resp.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            "nosniff"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.starts_with("# Autumn Admin\n"), "{body}");
+        for want in [
+            "### Project (`projects`)",
+            "### Ticket (`tickets`)",
+            "`GET /admin/projects`",
+            "`GET /admin/projects/new`",
+            "`GET /admin/projects/{id}/edit`",
+            "`GET /admin/projects/{id}/history`",
+            "`POST /admin/projects/actions`",
+            "`GET /admin/projects/export.csv`",
+        ] {
+            assert!(body.contains(want), "missing {want}:\n{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_llms_txt_inherits_admin_role_guard() {
+        use crate::registry::tests::DummyModel;
+        use autumn_web::session::Session;
+        use tower::ServiceExt as _;
+
+        let mut registry = AdminRegistry::new();
+        registry.register(DummyModel {
+            slug: "secrets_model",
+            name: "SecretModel",
+        });
+        let router = admin_router(
+            Arc::new(registry),
+            "/admin",
+            "/actuator".to_owned(),
+            AdminGuards {
+                auth_session_key: "user_id".to_owned(),
+                require_role: Some("admin".to_owned()),
+                step_up_mutations: true,
+                step_up_max_age_secs: 300,
+            },
+            None,
+            false,
+        )
+        .with_state(AppState::for_test());
+
+        // Unauthenticated session -> 401, model names not leaked.
+        let unauth = Session::new_for_test("sid-1".into(), HashMap::new());
+        let mut req = axum::http::Request::builder()
+            .uri("/llms.txt")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(unauth);
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let unauth_body = String::from_utf8(
+            axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!unauth_body.contains("secrets_model"), "{unauth_body}");
+
+        // Authenticated non-admin session -> 403.
+        let non_admin = Session::new_for_test(
+            "sid-2".into(),
+            HashMap::from([
+                ("user_id".to_owned(), "42".to_owned()),
+                ("role".to_owned(), "viewer".to_owned()),
+            ]),
+        );
+        let mut req = axum::http::Request::builder()
+            .uri("/llms.txt")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(non_admin);
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Authenticated admin session -> 200 OK (GET passes step-up guard too).
+        let admin = Session::new_for_test(
+            "sid-3".into(),
+            HashMap::from([
+                ("user_id".to_owned(), "1".to_owned()),
+                ("role".to_owned(), "admin".to_owned()),
+            ]),
+        );
+        let mut req = axum::http::Request::builder()
+            .uri("/llms.txt")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(admin);
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn admin_layout_includes_describedby_llms_txt_link() {
+        let registry = AdminRegistry::new();
+        let chrome = templates::AdminChrome {
+            registry: &registry,
+            prefix: "/admin",
+            actuator_prefix: "/actuator",
+            csrf_token: "",
+            csrf_form_field: "_csrf",
+            csrf_token_header: "X-CSRF-Token",
+            messages: &[],
+            show_config: false,
+            impersonation: None,
+        };
+        let html = templates::dashboard_page(&chrome, &[]).into_string();
+        assert!(
+            html.contains(r#"<link rel="describedby" type="text/plain" href="/admin/llms.txt">"#),
+            "{html}"
         );
     }
 }

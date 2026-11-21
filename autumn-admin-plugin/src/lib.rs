@@ -420,6 +420,7 @@ pub(crate) fn admin_route_infos(
     );
     let mut entries: Vec<(&str, String)> = vec![
         ("GET", prefix.to_string()),
+        ("GET", format!("{}/llms.txt", prefix.trim_end_matches('/'))),
         ("GET", format!("{prefix}/jobs")),
         ("GET", format!("{prefix}/jobs/counters")),
         ("POST", format!("{prefix}/jobs/{{id}}/retry")),
@@ -573,6 +574,7 @@ mod conformance_tests {
             .collect();
 
         for (method, path) in [
+            ("GET", "/admin/llms.txt"),
             ("GET", "/admin/jobs"),
             ("GET", "/admin/jobs/counters"),
             ("POST", "/admin/jobs/{id}/retry"),

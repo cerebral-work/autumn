@@ -14,7 +14,7 @@ name: Generator Conformance
 
 on:
   push:
-    branches: [trunk, trunk-dev]
+    branches: [cerebral, trunk, trunk-dev]
     paths:
       - ".github/workflows/generator-conformance.yml"
       - "autumn-cli/src/generate/**"
@@ -96,7 +96,7 @@ on:
       - "autumn-billing/**"
       - "Cargo.toml"
   pull_request:
-    branches: [trunk, trunk-dev]
+    branches: [cerebral, trunk, trunk-dev]
     paths:
       - ".github/workflows/generator-conformance.yml"
       - "autumn-cli/src/generate/**"

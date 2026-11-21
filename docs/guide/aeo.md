@@ -172,7 +172,8 @@ Call the converter yourself with `autumn_web::aeo::markdown::html_to_markdown`.
 
 | Path | Content |
 |---|---|
-| `/llms.txt` | Site name, summary, pages with `seo(title)`, agent entry points |
+| `/llms.txt` | Site name, summary, pages with `seo(title)`, non-hidden API endpoints, agent entry points |
+| `/actuator/llms.txt` | Active actuator observability and diagnostic endpoints |
 | `/.well-known/agent-skills/index.json` | Skills index (v0.2.0) with SHA-256 digests |
 | `/.well-known/agent-skills/<name>/SKILL.md` | One skill |
 | `/.well-known/ai-catalog.json`, `/.well-known/ard.json` | ARD manifest |

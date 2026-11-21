@@ -28,7 +28,7 @@ on:
     tags:
       - "v[0-9]+.*"
   pull_request:
-    branches: [trunk, trunk-dev]
+    branches: [cerebral, trunk, trunk-dev]
   workflow_dispatch:
     inputs:
       skip_semver:

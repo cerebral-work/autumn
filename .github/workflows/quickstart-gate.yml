@@ -31,7 +31,7 @@ name: Quickstart Gate
 
 on:
   push:
-    branches: [trunk-dev]
+    branches: [cerebral, trunk-dev]
   schedule:
     # Daily at 05:23 UTC — catches upstream dependency releases that break
     # the quickstart with no commit to this repo.

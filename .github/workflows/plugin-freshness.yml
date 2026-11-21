@@ -14,7 +14,7 @@ name: Plugin Freshness
 
 on:
   pull_request:
-    branches: [trunk, trunk-dev]
+    branches: [cerebral, trunk, trunk-dev]
     # Beyond the defaults (opened/synchronize/reopened): labeled/unlabeled so
     # adding or removing `plugin-exempt` re-evaluates the gate, and edited so
     # adding a [no-plugin] marker to the PR body does too — a plain re-run
@@ -38,7 +38,7 @@ jobs:
           fetch-depth: 0
       - name: Check plugin freshness
         env:
-          BASE_REF: origin/${{ github.base_ref }}
+          BASE_REF: origin/${{ github.base_ref || github.ref_name || 'cerebral' }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PLUGIN_EXEMPT_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'plugin-exempt') }}
         run: bash scripts/check-plugin-freshness.sh

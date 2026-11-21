@@ -31,7 +31,7 @@ on:
           - "true"
           - "false"
   pull_request:
-    branches: [trunk, trunk-dev]
+    branches: [cerebral, trunk, trunk-dev]
     paths:
       # Re-run when the benchmark module, CLI plumbing, or docs change
       - "autumn-cli/src/dev_loop_bench.rs"

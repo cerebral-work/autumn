@@ -5325,6 +5325,7 @@ pub(crate) fn actuator_endpoint_paths(
         actuator_route_path(prefix, "/info"),
         actuator_route_path(prefix, "/metrics"),
         actuator_route_path(prefix, "/a11y"),
+        actuator_route_path(prefix, "/llms.txt"),
         actuator_route_path(prefix, "/ui"),
         actuator_route_path(prefix, "/ui/metrics"),
     ];
@@ -5439,6 +5440,11 @@ pub(crate) fn actuator_router_with_prefix<
     sensitive: bool,
     prometheus_enabled: bool,
 ) -> axum::Router<S> {
+    let llms_body = Arc::<str>::from(render_actuator_llms_txt(
+        prefix,
+        sensitive,
+        prometheus_enabled,
+    ));
     let mut router = axum::Router::new()
         .route(
             &actuator_route_path(prefix, "/health"),
@@ -5455,6 +5461,13 @@ pub(crate) fn actuator_router_with_prefix<
         .route(
             &actuator_route_path(prefix, "/a11y"),
             axum::routing::get(a11y_endpoint::<S>),
+        )
+        .route(
+            &actuator_route_path(prefix, "/llms.txt"),
+            axum::routing::get(move || {
+                let body = Arc::clone(&llms_body);
+                async move { actuator_llms_txt(&body) }
+            }),
         );
 
     if prometheus_enabled {
@@ -5579,6 +5592,119 @@ pub(crate) fn actuator_router_with_prefix<
             &actuator_route_path(prefix, "/ui/metrics"),
             axum::routing::get(ui_metrics::<S>),
         )
+}
+
+fn actuator_llms_txt(body: &str) -> axum::response::Response {
+    (
+        StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            ),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        body.to_owned(),
+    )
+        .into_response()
+}
+
+fn render_actuator_llms_txt(prefix: &str, sensitive: bool, prometheus_enabled: bool) -> String {
+    use std::fmt::Write as _;
+
+    let route = |suffix: &str| actuator_route_path(prefix, suffix);
+    let mut out = String::from(
+        "# Autumn Actuator\n\n\
+         > Operational readiness, metrics, and runtime diagnostics surface.\n\n\
+         ## Endpoints\n\n",
+    );
+    for (method, suffix, desc) in [
+        ("GET", "/health", "Readiness and liveness probe"),
+        ("GET", "/info", "Build, version, and runtime metadata"),
+        (
+            "GET",
+            "/metrics",
+            "Structured HTTP and runtime metrics JSON",
+        ),
+        ("GET", "/a11y", "Accessibility scaffold posture"),
+        ("GET", "/ui", "Actuator HTMX dashboard"),
+        ("GET", "/ui/metrics", "Actuator metrics HTMX fragment"),
+        ("GET", "/llms.txt", "Actuator endpoint discovery"),
+    ] {
+        let _ = writeln!(out, "- `{method} {}`: {desc}", route(suffix));
+    }
+    if prometheus_enabled {
+        let _ = writeln!(
+            out,
+            "- `GET {}`: Prometheus exposition scrape endpoint",
+            route("/prometheus")
+        );
+    }
+    if sensitive {
+        out.push_str("\n## Sensitive Diagnostics\n\n");
+        for (method, suffix, desc) in [
+            ("GET", "/circuitbreakers", "Outbound circuit-breaker states"),
+            ("GET", "/env", "Redacted environment variables"),
+            ("GET", "/configprops", "Effective configuration properties"),
+            ("GET", "/loggers", "Runtime logger levels"),
+            ("PUT", "/loggers/{name}", "Update runtime logger level"),
+            ("GET", "/logfile", "Application log tail"),
+            ("GET", "/tasks", "Scheduled task status and history"),
+            ("GET", "/jobs", "Background job queue metrics"),
+            ("GET", "/ui/tasks", "Background tasks HTMX fragment"),
+            ("GET", "/shadow", "Shadow-traffic comparison metrics"),
+            ("GET", "/cost", "Request and resource cost telemetry"),
+            ("GET", "/graph", "Subsystem dependency graph"),
+            ("POST", "/capsules/export", "Export signed data capsule"),
+            ("POST", "/capsules/import", "Import signed data capsule"),
+            ("POST", "/capsules/verify", "Verify signed data capsule"),
+        ] {
+            let _ = writeln!(out, "- `{method} {}`: {desc}", route(suffix));
+        }
+        #[cfg(feature = "db")]
+        {
+            let _ = writeln!(
+                out,
+                "- `GET {}`: Database derivation graph",
+                route("/derivations")
+            );
+        }
+        #[cfg(feature = "http-client")]
+        {
+            let _ = writeln!(
+                out,
+                "- `GET {}`: Outbound webhook dead-letter queue",
+                route("/webhooks/dlq")
+            );
+            let _ = writeln!(
+                out,
+                "- `POST {}`: Replay dead-lettered webhook delivery",
+                route("/webhooks/replay")
+            );
+        }
+        #[cfg(feature = "system-info")]
+        {
+            let _ = writeln!(
+                out,
+                "- `GET {}`: Host and process system info",
+                route("/system")
+            );
+        }
+        #[cfg(feature = "ws")]
+        {
+            let _ = writeln!(
+                out,
+                "- `GET {}`: Active WebSocket broadcast channels",
+                route("/channels")
+            );
+            let _ = writeln!(
+                out,
+                "- `GET {}`: Live scheduled task event stream",
+                route("/tasks/stream")
+            );
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -9438,6 +9564,82 @@ autumn_circuit_breaker_slow_call_ratio{version=\"stable\",name=\"b\\\"slow\"} 1
         );
     }
 
+    #[tokio::test]
+    async fn actuator_llms_txt_lists_active_routes_and_respects_sensitive_and_prefix() {
+        let nonsensitive =
+            actuator_router_with_prefix("/ops", false, false).with_state(test_state());
+        let resp = nonsensitive
+            .oneshot(
+                Request::builder()
+                    .uri("/ops/llms.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            resp.headers().get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
+        let body = String::from_utf8(
+            axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.starts_with("# Autumn Actuator\n"), "{body}");
+        for want in [
+            "`GET /ops/health`",
+            "`GET /ops/info`",
+            "`GET /ops/metrics`",
+            "`GET /ops/ui`",
+            "`GET /ops/llms.txt`",
+        ] {
+            assert!(body.contains(want), "missing {want}:\n{body}");
+        }
+        for hidden in ["/ops/prometheus", "/ops/tasks", "/ops/jobs", "/ops/graph"] {
+            assert!(!body.contains(hidden), "unexpected {hidden}:\n{body}");
+        }
+
+        let sensitive = actuator_router(true).with_state(test_state());
+        let resp = sensitive
+            .oneshot(
+                Request::builder()
+                    .uri("/actuator/llms.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let full = String::from_utf8(
+            axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        for want in [
+            "`GET /actuator/prometheus`",
+            "`GET /actuator/tasks`",
+            "`GET /actuator/jobs`",
+            "`GET /actuator/graph`",
+        ] {
+            assert!(full.contains(want), "missing {want}:\n{full}");
+        }
+        assert!(
+            actuator_endpoint_paths("/actuator", false, true)
+                .iter()
+                .any(|p| p == "/actuator/llms.txt")
+        );
+    }
+
     // ── MetricsSource / MetricsSourceRegistry tests ────────────
 
     #[test]
@@ -11371,6 +11573,7 @@ async fn ui_dashboard() -> impl IntoResponse {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
+                link rel="describedby" type="text/plain" href="llms.txt";
                 title { "Autumn Actuator Dashboard" }
                 script src="/static/js/htmx.min.js" {}
                 style {

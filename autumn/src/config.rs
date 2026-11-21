@@ -16435,10 +16435,7 @@ path = "/healthz"
         assert!(repl_env.s3.is_none());
         assert!(repl_env.validation_errors().is_empty());
         let turso_env = repl_env.turso.expect("turso from env");
-        assert_eq!(
-            turso_env.url.as_deref(),
-            Some("https://turso.test:8080")
-        );
+        assert_eq!(turso_env.url.as_deref(), Some("https://turso.test:8080"));
         assert_eq!(turso_env.auth_token_env.as_deref(), Some("TURSO_TOKEN"));
     }
 

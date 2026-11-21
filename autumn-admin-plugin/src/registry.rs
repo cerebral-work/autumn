@@ -23,7 +23,7 @@ pub const RUNTIME_CONFIG_NAV_SLUG: &str = "__admin_config";
 // with_runtime_config is enabled.  The collision check for that case is
 // deferred to AdminPlugin::build() so deployments without runtime-config
 // can freely use a model with slug "config".
-const RESERVED_MODEL_SLUGS: &[&str] = &["jobs", JOBS_NAV_SLUG, RUNTIME_CONFIG_NAV_SLUG];
+const RESERVED_MODEL_SLUGS: &[&str] = &["jobs", "llms.txt", JOBS_NAV_SLUG, RUNTIME_CONFIG_NAV_SLUG];
 
 /// Holds all registered admin models, keyed by their URL slug.
 ///
@@ -220,6 +220,16 @@ pub mod tests {
         registry.register(DummyModel {
             slug: "jobs",
             name: "Jobs",
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "reserved model slug 'llms.txt'")]
+    fn reserved_llms_txt_slug_panics() {
+        let mut registry = AdminRegistry::new();
+        registry.register(DummyModel {
+            slug: "llms.txt",
+            name: "LLMs",
         });
     }
 
