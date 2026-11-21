@@ -30,7 +30,7 @@ name: Feature Combination Compile Gate
 
 on:
   push:
-    branches: [trunk, trunk-dev]
+    branches: [cerebral, trunk, trunk-dev]
     paths:
       - "autumn/Cargo.toml"
       - "autumn/src/**"
@@ -38,7 +38,7 @@ on:
       - "scripts/check-feature-combinations.sh"
       - ".github/workflows/feature-combinations.yml"
   pull_request:
-    branches: [trunk, trunk-dev]
+    branches: [cerebral, trunk, trunk-dev]
     paths:
       - "autumn/Cargo.toml"
       - "autumn/src/**"

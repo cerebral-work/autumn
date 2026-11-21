@@ -35,7 +35,7 @@ on:
           - "true"
           - "false"
   pull_request:
-    branches: [trunk, trunk-dev]
+    branches: [cerebral, trunk, trunk-dev]
     paths:
       # Re-run when the benchmark module, the live measurement driver, CLI
       # plumbing, scaffolding, docs, or this workflow change.

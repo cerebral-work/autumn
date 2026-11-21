@@ -15,7 +15,7 @@ on:
       - "scripts/verify-verus.sh"
       - ".github/workflows/verus.yml"
   push:
-    branches: [trunk, trunk-dev]
+    branches: [cerebral, trunk, trunk-dev]
     paths:
       - "verification/**"
       - "!verification/models/**"

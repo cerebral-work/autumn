@@ -50,3 +50,7 @@ benchmarks/runtime/load/results/
 # would create a second copy to keep in step, and the release gate rebuilds and
 # re-verifies it on every run anyway.
 sbom.cdx.json
+
+# Local DAG runner & telemetry scratch
+.dagrun/
+.dagr/

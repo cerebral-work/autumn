@@ -32,7 +32,7 @@ on:
         # bounded.
         default: "20"
   pull_request:
-    branches: [trunk, trunk-dev]
+    branches: [cerebral, trunk, trunk-dev]
     paths:
       - "autumn/src/capacity.rs"
       - "autumn/src/route_listing.rs"

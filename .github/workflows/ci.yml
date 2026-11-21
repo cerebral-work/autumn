@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [trunk, trunk-dev]
+    branches: [cerebral, trunk, trunk-dev]
   pull_request:
-    branches: [trunk, trunk-dev]
+    branches: [cerebral, trunk, trunk-dev]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -224,7 +224,7 @@ jobs:
         # Shares this docs-only job for the same reason as the gates around
         # it: no toolchain, no cache, reports in seconds.
         env:
-          BASE_REF: origin/${{ github.base_ref }}
+          BASE_REF: origin/${{ github.base_ref || github.ref_name || 'cerebral' }}
           PR_BODY: ${{ github.event.pull_request.body }}
           CHANGELOG_RELEASE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'release') }}
         run: ./scripts/check-changelog-fragments.sh --self-test && ./scripts/check-changelog-fragments.sh
@@ -768,9 +768,10 @@ jobs:
         # toolchain, no cache, reports in seconds. Self-tests first.
         env:
           # On a pull_request this is the branch being merged into; on a push to
-          # trunk-dev there is no base_ref, and the merge base with trunk-dev is
-          # HEAD itself, so the surface-change question correctly answers "no".
-          BASE_REF: origin/${{ github.base_ref || 'trunk-dev' }}
+          # cerebral or trunk-dev there is no base_ref, and the merge base with
+          # the pushed branch is HEAD itself, so the surface-change question
+          # correctly answers "no".
+          BASE_REF: origin/${{ github.base_ref || github.ref_name || 'cerebral' }}
         run: ./scripts/check-plugin-surface.sh
 
   plugin-contract:

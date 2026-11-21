@@ -1,0 +1,75 @@
+# Autumn Workstation & CI Validation DAG for dagrun v0.15.0+
+# Applies two-level cgroup-v2 containment, CPA moldable CPU width planning,
+# rss_baseline_bytes memory admission, and cargo-target lock serialization on ceres.
+
+version: 2
+
+default_jobs_flag: ""
+default_jobs_env: "CARGO_BUILD_JOBS"
+
+defaults:
+  timeout: 1800
+  env:
+    CARGO_BUILD_JOBS: "2"
+    JOBS: "2"
+    RUST_MIN_STACK: "8388608"
+
+resource_caps:
+  cargo-target: 1
+
+steps:
+  - job: fmt
+    group: rust
+    desc: "Verify Rust workspace formatting"
+    cmd: "cargo fmt --all -- --check"
+    cmdtype: unknown
+    jobs_env: ""
+    hint:
+      est_duration_s: 2.0
+      rss_baseline_bytes: 268435456
+      hard_mem_max_bytes: 1073741824
+
+  - job: check
+    group: rust
+    desc: "Type-check Rust workspace targets with -j 2"
+    cmd: "cargo check --workspace --locked -j 2 --all-targets"
+    cmdtype: unknown
+    deps:
+      - rust.fmt
+    hint:
+      est_duration_s: 180.0
+      rss_baseline_bytes: 3221225472
+      hard_mem_max_bytes: 8589934592
+      preferred_inner_jobs: 2
+      resources:
+        cargo-target: 1
+
+  - job: clippy
+    group: rust
+    desc: "Run workspace clippy with -j 2 and -D warnings"
+    cmd: "cargo clippy --workspace --locked -j 2 --all-targets -- -D warnings"
+    cmdtype: unknown
+    deps:
+      - rust.check
+    hint:
+      est_duration_s: 240.0
+      rss_baseline_bytes: 4294967296
+      hard_mem_max_bytes: 10737418240
+      preferred_inner_jobs: 2
+      resources:
+        cargo-target: 1
+
+  - job: test
+    group: rust
+    desc: "Run workspace unit and integration tests with -j 2"
+    cmd: "cargo test --workspace --locked -j 2"
+    cmdtype: unknown
+    deps:
+      - rust.clippy
+    hint:
+      est_duration_s: 300.0
+      rss_baseline_bytes: 4294967296
+      hard_mem_max_bytes: 10737418240
+      preferred_inner_jobs: 2
+      resources:
+        cargo-target: 1

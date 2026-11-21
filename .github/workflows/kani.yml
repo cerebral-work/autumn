@@ -22,7 +22,7 @@ on:
       - "autumn/src/time_math.rs"
       - ".github/workflows/kani.yml"
   push:
-    branches: [trunk, trunk-dev]
+    branches: [cerebral, trunk, trunk-dev]
     paths:
       - "autumn/src/admission.rs"
       - "autumn/src/backoff.rs"

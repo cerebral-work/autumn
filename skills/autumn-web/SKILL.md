@@ -506,7 +506,9 @@ example: `examples/reddit-clone` (`src/seo.rs`, `autumn.toml`).
 **Agent readiness (AEO, on by default):** `[aeo]` in `autumn.toml`. No code:
 `Accept: text/markdown` on an HTML page returns Markdown (`Vary: Accept`); the
 homepage sends agent `Link` headers; the router fallback serves `/robots.txt`
-(AI crawler groups + `Content-Signal`), `/llms.txt`, the agent skills index,
+(AI crawler groups + `Content-Signal`), `/llms.txt` (including non-hidden
+`ApiDoc` endpoints; `autumn-admin-plugin`, `autumn-edge`, and `/actuator/llms.txt`
+also mount surface-specific `llms.txt` indexes), the agent skills index,
 the ARD manifest, and, when the app has them, the MCP server card, the RFC 9727
 API catalog, OAuth metadata, and `/auth.md`. An app route at the same path
 wins. Add `(autumn_web::aeo::webmcp::head_tags(None, csrf_token))` to the layout `<head>`
